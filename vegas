@@ -1,0 +1,1523 @@
+#!/usr/bin/perl
+use Cwd;
+use File::Spec::Functions qw(rel2abs); 
+use File::Basename; 
+use Scalar::Util qw(looks_like_number);
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+# VEGAS
+$version = "0.8.27"; # Date of last major modification
+
+###--- BEGIN FRONT MATTER ---###
+
+print "\n########################################################\n";
+print "#                                                      #\n";
+print "# VEGAS: Versatile Gene-based Association Study $version #\n";
+print "#                                                      #\n";
+print "########################################################\n\n";
+
+$dir = dirname(rel2abs($0));
+
+print "Options in effect: \n";
+print "-input $ARGV[0]\n";
+
+# Options
+for($i = 1; $i <= $#ARGV; ++$i){
+	$field = $ARGV[$i];
+	if(length($field)>1){
+		if($field eq "-top"){ # Top X test
+			$topten = "$field";
+			$perc = $ARGV[$i+1];
+			print "-top $perc\n";
+			if($perc > 100 || $perc < 0){
+				die "Error: Percentage must be between 0 and 100\n";
+			}
+			$percentage = $perc/100;
+		}
+		if($field eq "-topsnp"){ #Do TopSNP test
+			$topsnp = 1;
+			print "$field\n";
+		}
+		if($field eq "-pop"){ # Specify reference pop
+			$chip = "$dir/$ARGV[$i+1]";
+			print "-pop $ARGV[$i+1]\n";
+		}
+		if($field eq "-hapmapCEU"){ # Older versions - keep -hapmapCEU for QIMR users. Eventually supercede by -pop
+			$chip = "/scratch/jimmyL/genebased/hapmapCEU";
+			print "$field\n";
+		}
+		elsif($field eq "-hapmapYRI"){
+			$chip = "/scratch/jimmyL/genebased/hapmapYRI";
+			print "$field\n";
+		}
+		elsif($field eq "-hapmapEASIA"){
+			$chip = "/scratch/jimmyL/genebased/hapmapEASIA";
+			print "$field\n";
+		}
+		elsif($field eq "-hapmapCEU-zeroboundary"){
+			$chip = "/scratch/jimmyL/genebased/hapmapCEU-zeroboundary";
+			print "$field\n";
+		}
+#		elsif($field eq "-affy6"){ # Discard: Not huge advantage offered by predefs
+#			$chip = "$dir/affy6";
+#			print "$field\n";
+#		}
+#		elsif($field eq "-illumina610"){
+#			$chip = "$dir/illumina610";
+#			print "$field\n";
+#		}
+#		elsif($field eq "-custom"){ # Discard: -custom superceded by -pop
+#			$chip = "$ARGV[$i+1]";
+#			$custom = 1;
+#			print "-custom $chip\n";
+#		}
+#		if($field eq "-deflate"){ # Discard: Pvalues should be adjust before submitting in the first place - this just slows things down
+#			$deflate = 1;
+#			print "$field\n";
+#		}
+		if($field eq "-summary"){ # Make summary file - need quicker?
+			$summary = 1;
+			print "$field\n";
+		}
+		if($field eq "-chr"){ # Do test for specific chromosome
+			$dochr = "$ARGV[$i+1]";
+			print "-chr $dochr\n";
+			if ($dochr > 23 || $dochr < 1){
+				die "Error: -chr must be a number between 1 and 22\n";
+			}
+		}
+		if($field eq "-out"){ # Specify outfile
+			print "-out $ARGV[$i+1]\n";
+			$outfile = "$ARGV[$i+1]";
+		}
+		if($field eq "-genelist"){ # Do test for list of genes
+			print "-genelist $ARGV[$i+1]\n";
+			$list = "$ARGV[$i+1]";
+			if(!-e "$list"){
+				die "Error: $list not found\n";
+			}
+			open(LIST, "$list");
+			@genelist = <LIST>;
+			close LIST;
+		}
+		if($field eq "-max"){ # Specify max number of sims (default is 1000000)
+			print "-max $ARGV[$i+1]\n";
+			$max = "$ARGV[$i+1]";
+			if($max < 100000){
+				die "Error: maximum number of sims must be greater than 100000\n";
+			}
+		}
+#		if($field eq "-adjust"){ # Discard. Don't remember what this is for.
+#			$adjust = 1;
+#		}
+		if($field eq "-keeptimestamp"){ # Do not delete time_stamp folder
+			print "-keeptimestamp\n";
+			$keeptimestamp = 1;
+		}
+		if($field eq "-custom"){ # Use custom individual genotypes - do not confuse with previous -custom (replaced with -pop)
+			print "-custom $ARGV[$i+1]\n";
+			$custom = "$ARGV[$i+1]";
+			$chip = "$dir/hapmapCEU";
+		}
+		if($field eq "-upper"){ # Upper boundary (use with -custom)
+			print "-upper $ARGV[$i+1]\n";
+			$upper = "$ARGV[$i+1]";
+		}
+		if($field eq "-lower"){ # Lower boundary (use with -custom)
+			print "-lower $ARGV[$i+1]\n";
+			$lower = "$ARGV[$i+1]";
+		}
+	}
+}
+
+
+
+# Make working directory
+my ($Second, $Minute, $Hour, $Day, $Month, $Year, $WeekDay, $DayOfYear, $IsDST) = localtime(time) ;
+$time_stamp = $DayOfYear.$Hour.$Minute.$Second.$outfile.$dochr;
+mkdir "$time_stamp", 0777 or die "Error: cannot make working directory. Check that vegas has correct permission settings: $!";
+
+print "\nCreating working directory: $time_stamp\n";
+
+# Check that p-values file exists
+if(!-e "$ARGV[0]"){
+	die "Error: $ARGV[0] not found\n";
+}
+
+open(PVALS, "$ARGV[0]"); # Location of GWAS results file
+@pvals = <PVALS>;
+
+# Check that custom genotypes exist - and that length of $custom.bim is the same as @pvals
+if(defined($custom)){
+	if(!-e "$custom.bed"){
+		die "Error: $custom.bed not found\n";
+	}
+	if(!-e "$custom.bim"){
+		die "Error: $custom.bim not found\n";
+	}
+	if(!-e "$custom.fam"){
+		die "Error: $custom.fam not found\n";
+	}
+}
+
+# Check upper and lower are being used corrected
+if(defined($upper) || defined($lower)){
+	if(!defined($custom)){
+		die "Error: -upper and -lower can only be used for custom individual genotypes\n";
+	}
+}
+
+chdir "$time_stamp" or die "Error: cannot change to working directory: $!";
+
+# Check that R and plink exists
+system("echo -n \$PATH > path");
+
+open(PATH, "path");
+$path = <PATH>;
+@path = split(/:/, $path);
+
+$Rtimes=0;
+$plinktimes=0;
+
+foreach $i(@path){
+	#print "$i\n";
+	if(-e "$i/R"){
+		$Rtimes=$Rtimes+1;
+	}
+	if(-e "$i/plink"){
+		$plinktimes=$plinktimes+1;
+	}
+}
+if($Rtimes==0){
+	chdir "../" or die "cannot change directory: $!";
+	system("rm -R $time_stamp");
+	die "Error: Cannot find R - make sure it can be accessed through \$PATH \n$!\n";
+}
+if($plinktimes==0){
+	chdir "../" or die "cannot change directory: $!";
+	system("rm -R $time_stamp");
+	die "Error: Cannot find plink - make sure it can be accessed through \$PATH \n$!\n";
+}
+
+close PATH;
+system("rm path");
+
+# Check that mvtnorm and corpcor exists
+&checkpackages;
+
+# Write files to server
+open(TEMPPVALS, ">temppvals");
+print TEMPPVALS "@pvals";
+
+close PVALS;
+close TEMPPVALS;
+
+# Validations
+
+# Check pvalues in file are valid - in decimal or standard scientific notation (0.0034, 1e-6 etc...)
+print "\nValidating input file...";
+&numbercheck;
+print "done.\n";
+
+# More validations
+if(!defined($custom)){
+	if (!defined($chip)){
+		die "Error: Invalid SNP-set selection\n";
+	}
+	if (!-d "$chip/geneset"){
+		die "Error: $chip/geneset does not exist\n";
+	}
+	if (!-d "$chip/gene"){
+		die "Error: $chip/gene does not exist\n";
+	}
+	if (!-d "$chip/genebeds"){
+		die "Error: $chip/genebeds does not exist\n";
+	}
+}
+if(defined($topten) and defined($topsnp)){
+	die "Error: Cannont do -topten and -topsnp test concurrently\n";
+}
+if (defined($list) and defined($dochr)){
+	die "Error: Cannot do -genelist and -chr test concurrently\n";
+}
+
+
+###--- END FRONT MATTER ---###
+
+###--- BEGIN GENEBASED TEST ---###
+
+# Do test
+if(defined($topten)){
+	system("echo \"Chr Gene nSNPs nSims Start Stop Test Pvalue Top-$percentage-pvalue Best-SNP SNP-pvalue\" > gene-basedoutput.out");
+}
+if(defined($topsnp)){
+	system("echo \"Chr Gene nSNPs nSims Start Stop Test Pvalue Top-SNP-pvalue Best-SNP SNP-pvalue\" > gene-basedoutput.out");
+}
+unless(defined($topsnp) || defined($topten)){ # Define vanilla test
+	system("echo \"Chr Gene nSNPs nSims Start Stop Test Pvalue Best-SNP SNP-pvalue\" > gene-basedoutput.out");
+}
+	
+
+if(defined($custom)){
+	if(defined($dochr)){
+		&docustomchr;
+	}
+	if(defined($list)){
+		&docustomlist;
+	}
+	if(!defined($list) and !defined($dochr)){
+		&customtest;
+	}
+	if(defined($clustertest)){
+		&clustertest;
+	}
+}
+else{
+	if(defined($dochr)){
+		&dochrtest;
+	}
+	if(defined($list)){
+		&genelisttest;
+	}
+	if(!defined($list) and !defined($dochr)){
+		&defaulttest;
+	}
+}
+# Clean up files
+
+if(defined($outfile)){
+	system("cp gene-basedoutput.out ../$outfile.out");
+}
+else{
+	system("cp gene-basedoutput.out ../gene-basedoutput.out");
+}
+
+chdir "../" or die "Error: Cannot change directory: $!";
+unless(defined($keeptimestamp)){
+	system("rm -R $time_stamp");
+}
+#rmdir $time_stamp or warn "cannot remove $time_stamp\n";
+
+print "\nGene-based test complete!\n";
+
+###--- END GENEBASED TEST ---###
+
+###--- START SUBROUTINES ---###
+
+sub defaulttest{ # Vanilla test
+
+	print "\nAnnotating GWAS results...";
+	&makemerger;
+	print "done\n\n";
+
+	for ($chr = 1; $chr <= 22; $chr++) {
+	#for ($chr = 17) {
+		open(MERGEFILE, "merged$chr"); # Check if there are genes on chromosome
+		my @mergefile = <MERGEFILE>;
+		close(MERGEFILE);
+		if(scalar(@mergefile) == 1){
+			next;
+		}
+		
+		print "Starting chromosome $chr\n";
+		open(ALLGENES, "$chip/geneset/allgene$chr");
+
+		@allgenes = <ALLGENES>;
+		close ALLGENES;
+	
+		if(defined($summary)){
+			print "Generating summary file...";
+			&summary;
+			print "done\n\n";
+		}
+	
+		&dogene;
+	}
+}
+
+sub dochrtest{ # Chromosome test
+	print "\nAnnotating GWAS results...";
+		&makemergerdochr;
+	print "done\n\n";
+
+	for ($chr = $dochr) {
+
+		print "Starting chromosome $chr\n";
+	
+		open(ALLGENES, "$chip/geneset/allgene$chr");
+
+		@allgenes = <ALLGENES>;
+		close ALLGENES;
+	
+		if(defined($summary)){
+			print "Generating summary file...";
+			&summary;
+		}
+		&dogene;
+	}
+}
+
+sub genelisttest{ # Genelist test
+	open(HG18, "$chip/glist-hg18");
+	@hg18 = <HG18>;
+	close HG18;
+
+	chomp(@genelist);
+
+	# Read in genelist and match to chromosomes
+	foreach $genelist (@genelist){
+		chomp($genelist);
+		$genelist =~ s/^\s+//;
+		$genelist =~ s/\s+$//;
+		foreach $hg18 (@hg18){
+			chomp($hg18);
+			$hg18 =~ s/^\s+//;
+			$hg18 =~ s/\s+$//;
+			@hglist = split(/ /,$hg18);
+			if($genelist eq @hglist[3]){
+				push(@dochroms,"@hglist[0]\n");
+				push(@dogenes,"@hglist[3]\n");
+			
+				open(WRITECHR, ">>allgene@hglist[0]");
+				print WRITECHR "$genelist\n";
+				close WRITECHR;			
+			}
+		}
+	}
+
+	# Extract unique chromosomes
+	%seen = ();
+	foreach $item (@dochroms){
+		push(@uniqchr, $item) unless $seen{$item}++;
+	}
+
+	foreach $chr(@uniqchr) {
+	#for ($chr = 17) {
+		
+		chomp($chr);
+		print "\nAnnotating genes on chromosome $chr...";
+		$dochr = $chr;
+		&makemergerdochr;
+		print "done\n\n";
+
+		print "Starting chromosome $chr\n";
+		open(ALLGENES, "allgene$chr");
+
+		@allgenes = <ALLGENES>;
+		close ALLGENES;
+	
+		if(defined($summary)){
+			print "Generating summary file...";
+			&summary;
+		}
+		&dogene;
+	}
+}
+
+sub makemerger{ # Makemerge - genome-wide
+system("
+R --vanilla --slave  <<EOF
+
+options(warn=-1)
+
+#read in GWAS results
+pvals <- read.table('temppvals',header=F,colClasses=c('character','numeric'))
+names(pvals) <- c('SNP','PVALUE')
+
+#read in start/stop positions for each gene
+read.table('$chip/glist-hg18',colClasses=c('character',rep('integer',2),'character')) -> startstop
+names(startstop) <- c('chr','start','stop','gene')
+
+snpgenevec <- seq(1,22)
+
+for(chr in snpgenevec){
+	filename <- paste('$chip/geneset/snpgene',chr,sep='')
+	#read in which SNPs map to which gene
+	read.table(file=filename,colClasses=c('character','character')) -> wp
+	names(wp) <- c('gene','rs')
+
+	merge(startstop,wp,by='gene',all.y=T) -> wp
+
+	#convert p-values to chi2-df1 stats
+	qchisq(pvals[,2],1,lower.tail=F) -> chi2 
+	data.frame(pvals[,1],chi2) -> chi2withrs
+	names(chi2withrs) <- c('SNP','chisq')
+
+	merge(wp,chi2withrs,by.x='rs',by.y='SNP') -> mer
+
+	writename <- paste('merged',chr,sep='')
+	write.table(mer,file=writename,row.names=F,quote=F)
+}
+
+EOF");
+}
+
+sub makemergerdochr{ # Makemerge - single chromosome
+
+system("
+R --vanilla --slave  <<EOF
+
+options(warn=-1)
+
+#read in GWAS results
+pvals <- read.table('temppvals',header=F,colClasses=c('character','numeric'))
+names(pvals) <- c('SNP','PVALUE')
+
+#read in start/stop positions for each gene
+read.table('$chip/glist-hg18',colClasses=c('character',rep('integer',2),'character')) -> startstop
+names(startstop) <- c('chr','start','stop','gene')
+
+#read in which SNPs map to which gene
+read.table('$chip/geneset/snpgene$dochr',colClasses=c('character','character')) -> wp
+names(wp) <- c('gene','rs')
+
+merge(startstop,wp,by='gene',all.y=T) -> wp
+
+#conver p-values to chi2-df1 stats
+qchisq(pvals[,2],1,lower.tail=F) -> chi2 
+data.frame(pvals[,1],chi2) -> chi2withrs
+names(chi2withrs) <- c('SNP','chisq')
+
+merge(wp,chi2withrs,by.x='rs',by.y='SNP') -> mer
+
+write.table(mer,file='merged$dochr',row.names=F,quote=F)
+
+EOF");
+}
+
+sub summary { # Make summary file
+	for ($mchr = 1; $mchr <= 22; $mchr++) {
+		if(!-e "merged$mchr"){
+			next;
+		}
+		open(MERGEDFILE, "merged$mchr");
+		my @mergedfile = <MERGEDFILE>;
+		if(scalar(@mergedfile) == 1){
+			next;
+		}
+		
+		system("sed '1d' merged$mchr | sort -k 2 >> summary.long");
+	}
+
+	if(defined($outfile)){
+		system("echo \"SNP Gene Chr Start Stop Chisq\" > ../$outfile.summary");
+		system("cat summary.long >> ../$outfile.summary");
+	}
+	else{
+		system("echo \"rs gene chr start stop chisfq\" > ../genebased-output.summary");
+		system("cat summary.long >> ../genebased-output.summary");	
+	}
+}
+
+sub dogene{ # Main gene-based test outline
+	unless(defined($topsnp) || defined($topten)){ # Define vanilla test
+		$vanillatest=1;
+	}
+	
+		
+	foreach $gene (@allgenes){
+	#for ($gene = "TNRC6C"){
+		chomp($gene);
+		#print "$gene\n";
+		
+		#system("grep -w '$gene' merged$chr > tempgene");
+		open(MERGEDFILE,"merged$chr");
+		@tempgene = grep /\b $gene \b/i, <MERGEDFILE>;
+		close(MERGEDFILE);
+		
+		open(PRINTTEMPGENE,">tempgene");
+		print PRINTTEMPGENE "@tempgene";
+		close(PRINTTEMPGENE);
+		
+		if(-z "tempgene"){next;} # If file is empty, move on
+		
+		system("awk  '{print \$1;}' tempgene > tempgene.snp");
+		
+		open(PREDEFGENE, "$chip/genebeds/$gene.bim");
+		@predefgene = <PREDEFGENE>;
+		close PREDEFGENE;
+
+		#check that gene exists in geneset
+		if (scalar(@predefgene) == 0){
+			print "Gene doesn't exist...\n";
+		}
+		else{
+			&hapsims;
+		}
+	}
+	
+}
+
+sub hapsims {
+	if (-e "needmoresims"){system("rm needmoresims");}
+	if (-e "correctedp.txt"){system("rm correctedp.txt");}
+	if (-e "plink.ld"){system("rm plink.ld");}
+	if (-e "do100000sims"){system("rm do100000sims");}
+	if (-e "alwayswritep"){system("rm alwayswritep");}
+	
+	&plink;
+	
+	# 1000 sims
+	if(defined($vanillatest)){
+		&mvsimsr(1000);
+	}
+	if(defined($topten)){
+		&mvsimstoptenr(1000);
+	}
+	if(defined($topsnp)){
+		&mvsimstopsnpr(1000);
+	}
+	
+	
+	if (-e "correctedp.txt"){ # If 1000 sims is enough
+		open(CORRECTEDP, "correctedp.txt");
+		$correctedp = <CORRECTEDP>;
+		open(PRINTCORRECTEDP, ">>gene-basedoutput.out");
+		print PRINTCORRECTEDP "$correctedp";
+		print "$correctedp";
+	}
+	
+	if (-e "do100000sims"){ # Do 100000 sims
+		if(defined($vanillatest)){
+			&mvsimsr(100000);
+		}
+		if(defined($topten)){
+			&mvsimstoptenr(100000);
+		}
+		if(defined($topsnp)){
+			&mvsimstopsnpr(100000);
+		}
+		
+		if(-e "correctedp.txt"){ # If p>0.1 (not likely) write output
+			open(CORRECTEDP, "correctedp.txt");
+			$correctedp = <CORRECTEDP>;
+			open(PRINTCORRECTEDP, ">>gene-basedoutput.out");
+			print PRINTCORRECTEDP "$correctedp";
+			print "$correctedp";
+		}
+		if(-e "do100000sims"){ # If 0.001 < p < 0.1, write output
+			open(CORRECTEDP, "do100000sims");
+			$correctedp = <CORRECTEDP>;
+			open(PRINTCORRECTEDP, ">>gene-basedoutput.out");
+			print PRINTCORRECTEDP "$correctedp";
+			print "$correctedp";
+		}
+		if(-e "needmoresims"){ #Do max sims, then write output
+			if(defined($max)){
+				if(defined($vanillatest)){
+					&mvsimsr($max);
+				}
+				if(defined($topten)){
+					&mvsimstoptenr($max);
+				}
+				if(defined($topsnp)){
+					&mvsimstopsnpr($max);
+				}
+			}
+			else{
+				if(defined($vanillatest)){
+					&mvsimsr(1000000);
+				}
+				if(defined($topten)){
+					&mvsimstoptenr(1000000);
+				}
+				if(defined($topsnp)){
+					&mvsimstopsnpr(1000000);
+				}
+			}
+			open(CORRECTEDP, "alwayswritep");
+			$correctedp = <CORRECTEDP>;
+			open(PRINTCORRECTEDP, ">>gene-basedoutput.out");
+			print PRINTCORRECTEDP "$correctedp";
+			print "$correctedp";
+			
+		}
+	}
+	
+	if (-e "needmoresims"){ # Do max sims
+		if(defined($max)){
+			if(defined($vanillatest)){
+				&mvsimsr($max);
+			}
+			if(defined($topten)){
+				&mvsimstoptenr($max);
+			}
+			if(defined($topsnp)){
+				&mvsimstopsnpr($max);
+			}
+		}
+		else{
+			if(defined($vanillatest)){
+				&mvsimsr(1000000);
+			}
+			if(defined($topten)){
+				&mvsimstoptenr(1000000);
+			}
+			if(defined($topsnp)){
+				&mvsimstopsnpr(1000000);
+			}
+		}
+		open(CORRECTEDP, "alwayswritep");
+		$correctedp = <CORRECTEDP>;
+		open(PRINTCORRECTEDP, ">>gene-basedoutput.out");
+		print PRINTCORRECTEDP "$correctedp";
+		print "$correctedp";
+	}
+}
+
+sub mvsimsr{
+
+	if (-e "needmoresims"){system("rm needmoresims");}
+	if (-e "correctedp.txt"){system("rm correctedp.txt");}
+	if (-e "do100000sims"){system("rm do100000sims");}
+	if (-e "alwayswritep"){system("rm alwayswritep");}	
+
+system("
+
+R --vanilla --slave  <<EOF
+
+options(warn=-1)
+
+rm(list = ls(all = TRUE))
+
+#read in ld matrix and generate lots of null chi distns based on correlated snps
+
+#library(mvtnorm)
+numsnps <- $numsnps
+matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+#co <- sqrt(co)
+#head(co)
+
+#check that co is positive definite. Make diagonals 1.0001.
+
+library(corpcor)
+
+reps <- $_[0]
+
+
+if(is.positive.definite(co)==F){
+	co <- make.positive.definite(co)
+}
+if(is.positive.definite(co)==F){
+	matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+	for(i in 1:numsnps){
+		co[i,i] <- 1.0001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.01
+	}
+}
+
+
+library(mvtnorm)
+rmvnorm(reps,mean=rep(0,numsnps),sigma=co) -> rd
+
+rowSums(rd ^2) -> summedsq
+
+
+#write.table(data.frame(summedsq,summedsqtopten),file='geneXsummedsq.txt',row.names=F,quote=F,col.names=F)
+
+read.table('tempgene',header=F) -> gene
+ass <- gene[,6]
+#ass
+sum(ass,na.rm=T) -> sumass
+sum(!is.na(ass)) -> len # get number of snps with non-missing test stat
+length(ass) -> asslen
+
+#scan('geneXsummedsq.txt') -> simvals # read in simulation replicates
+
+#head(simvals)
+sum(ifelse(sumass > summedsq, 0, 1))/length(summedsq) -> empp
+#empp
+
+snpp <- pchisq(max(ass),1,lower.tail=F)
+snpname <- gene[which(ass==max(ass)),1][1]
+
+if(empp>0.1){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,snpname,snpp),'correctedp.txt',row.names=F,col.names=F)
+}
+
+if(empp<=0.1 & empp>0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empp<=0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,snpname,snpp),'needmoresims',row.names=F,col.names=F)
+}
+
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,snpname,snpp),'alwayswritep',row.names=F,col.names=F)
+
+EOF
+");
+}
+
+sub mvsimstoptenr{
+
+if (-e "needmoresims"){system("rm needmoresims");}
+if (-e "correctedp.txt"){system("rm correctedp.txt");}
+if (-e "do100000sims"){system("rm do100000sims");}
+if (-e "alwayswritep"){system("rm alwayswritep");}
+
+if(-e "tempempp"){system("rm tempempp")}
+if(-e "temprd2"){system("rm temprd2")}
+if(-e "temprd-sorted"){system("rm temprd-sorted")}
+
+if($_[0] == 1000){
+
+system("R --vanilla --slave <<EOF
+
+options(warn=-1)
+rm(list = ls(all = TRUE))
+
+#read in ld matrix and generate lots of null chi distns based on correlated snps
+
+#library(mvtnorm)
+$numsnps -> numsnps
+matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+#co <- sqrt(co)
+#head(co)
+
+#check that co is positive definite. Make diagonals 1.0001.
+
+library(corpcor)
+
+reps <- $_[0]
+
+
+if(is.positive.definite(co)==F){
+	co <- make.positive.definite(co)
+}
+if(is.positive.definite(co)==F){
+	matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+	for(i in 1:numsnps){
+		co[i,i] <- 1.0001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.01
+	}
+}
+
+
+library(mvtnorm)
+rmvnorm(reps,mean=rep(0,numsnps),sigma=co) -> rd
+
+rowSums(rd ^2) -> summedsq
+
+percentage <- $percentage
+
+topten <- function(x){
+	sum(sort(x,decreasing=T)[1:(1+length(diag(co))*percentage)]^2)
+}
+
+apply(rd,1,topten) -> summedsqtopten
+
+read.table('tempgene',header=F) -> gene
+ass <- gene[,6]
+#ass
+sum(ass,na.rm=T) -> sumass
+sum(!is.na(ass)) -> len # get number of snps with non-missing test stat
+length(ass) -> asslen
+
+asstopten <- sort(ass,decreasing=T)[1:(1+length(diag(co))*percentage)]
+sumasstopten <- sum(asstopten)
+sum(ifelse(sumasstopten > summedsqtopten, 0, 1))/length(summedsqtopten) -> empptopten
+#empptopten
+
+sum(ifelse(sumass > summedsq, 0, 1))/length(summedsq) -> empp
+#empp
+
+snpp <- pchisq(max(ass),1,lower.tail=F)
+snpname <- gene[which(ass==max(ass)),1][1]
+
+if(empp >= 0.1 & empptopten >= 0.1){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'correctedp.txt',row.names=F,col.names=F)
+}
+
+if(empp < 0.1 & empp > 0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten < 0.1 & empptopten > 0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten <= 0.001 | empp <= 0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'needmoresims',row.names=F,col.names=F)
+}
+
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'alwayswritep',row.names=F,col.names=F)
+
+EOF");
+}
+
+
+if($_[0] > 1000){ # Do 1e5 simulations and topten sort etc, save to disk, then repeat until reach 1e6 (or $max)
+	my $reps = int($_[0]/100000);
+	for($i = 1; $i <= $reps; $i++){
+		system("R --vanilla --slave <<EOF
+numsnps <- $numsnps
+reps <- 100000
+percentage <- $percentage
+options(warn=-1)
+
+matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+
+library(corpcor)
+
+if(is.positive.definite(co)==F){
+	co <- make.positive.definite(co)
+}
+if(is.positive.definite(co)==F){
+	matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+	for(i in 1:numsnps){
+		co[i,i] <- 1.0001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.01
+	}
+}
+
+library(mvtnorm)
+rmvnorm(reps,mean=rep(0,numsnps),sigma=co) -> rd
+rowSums(rd ^2) -> summedsq
+
+topten <- function(x){
+	sum(sort(x,decreasing=T)[1:(1+length(diag(co))*percentage)]^2)
+}
+
+apply(rd,1,topten) -> summedsqtopten
+
+write.table(summedsq,'vanilla',append=T,col.names=F,row.names=F,quote=F)
+write.table(summedsqtopten,'topten',append=T,col.names=F,row.names=F,quote=F)
+EOF")
+	}
+	system("R --vanilla --slave <<EOF
+read.table('tempgene',header=F) -> gene
+summedsqtopten <- scan('topten')
+summedsq <- scan('vanilla')
+percentage <- $percentage
+reps <- $_[0]
+
+ass <- gene[,6]
+#ass
+sum(ass,na.rm=T) -> sumass
+sum(!is.na(ass)) -> len # get number of snps with non-missing test stat
+length(ass) -> asslen
+
+asstopten <- sort(ass,decreasing=T)[1:(1+length(gene[,1])*percentage)]
+sumasstopten <- sum(asstopten)
+sum(ifelse(sumasstopten > summedsqtopten, 0, 1))/length(summedsqtopten) -> empptopten
+#empptopten
+
+sum(ifelse(sumass > summedsq, 0, 1))/length(summedsq) -> empp
+#empp
+
+snpp <- pchisq(max(ass),1,lower.tail=F)
+snpname <- gene[which(ass==max(ass)),1][1]
+
+if(empp >= 0.1 & empptopten >= 0.1){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'correctedp.txt',row.names=F,col.names=F)
+}
+
+if(empp < 0.1 & empp > 0){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten < 0.1 & empptopten > 0){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten == 0 | empp == 0){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'needmoresims',row.names=F,col.names=F)
+}
+
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'alwayswritep',row.names=F,col.names=F)
+
+EOF");
+
+system("rm vanilla topten");
+
+}
+}
+
+sub mvsimstopsnpr{
+if (-e "needmoresims"){system("rm needmoresims");}
+if (-e "correctedp.txt"){system("rm correctedp.txt");}
+if (-e "do100000sims"){system("rm do100000sims");}
+if (-e "alwayswritep"){system("rm alwayswritep");}
+if(-e "tempempp"){system("rm tempempp")}
+if(-e "temprd2"){system("rm temprd2")}
+if(-e "temprd-sorted"){system("rm temprd-sorted")}
+
+#if($_[0] == 1000){
+
+#system("R --vanilla --slave  <<EOF
+system("R --vanilla --slave <<EOF
+options(warn=-1)
+rm(list = ls(all = TRUE))
+
+#read in ld matrix and generate lots of null chi distns based on correlated snps
+
+#library(mvtnorm)
+$numsnps -> numsnps
+matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+#co <- sqrt(co)
+#head(co)
+
+#check that co is positive definite. Make diagonals 1.0001.
+
+library(corpcor)
+
+reps <- $_[0]
+
+
+if(is.positive.definite(co)==F){
+	co <- make.positive.definite(co)
+}
+if(is.positive.definite(co)==F){
+	matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+	for(i in 1:numsnps){
+		co[i,i] <- 1.0001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.01
+	}
+}
+
+
+library(mvtnorm)
+rmvnorm(reps,mean=rep(0,numsnps),sigma=co) -> rd
+
+rowSums(rd ^2) -> summedsq
+
+percentage <- $percentage
+
+topsnps <- function(x){
+	max(x^2) -> topten
+}
+apply(rd,1,topsnps) -> summedsqtopten
+
+read.table('tempgene',header=F) -> gene
+ass <- gene[,6]
+#ass
+sum(ass,na.rm=T) -> sumass
+sum(!is.na(ass)) -> len # get number of snps with non-missing test stat
+length(ass) -> asslen
+
+sumasstopten <- max(ass)
+sum(ifelse(sumasstopten > summedsqtopten, 0, 1))/length(summedsqtopten) -> empptopten
+empptopten
+
+sum(ifelse(sumass > summedsq, 0, 1))/length(summedsq) -> empp
+empp
+
+snpp <- pchisq(max(ass),1,lower.tail=F)
+snpname <- gene[which(ass==max(ass)),1][1]
+
+if(empp >= 0.1 & empptopten >= 0.1){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'correctedp.txt',row.names=F,col.names=F)
+}
+
+if(empp < 0.1 & empp > 0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten < 0.1 & empptopten > 0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten <= 0.001 | empp <= 0.001){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'needmoresims',row.names=F,col.names=F)
+}
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'alwayswritep',row.names=F,col.names=F)
+
+
+EOF");
+#}
+
+
+if($_[0] > 10000000000000000000000000000000000){ # Keep this here, but don't use for now.
+
+system("R --vanilla --slave <<EOF
+
+options(warn=-1)
+rm(list = ls(all = TRUE))
+
+$numsnps -> numsnps
+matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+#co <- sqrt(co)
+#head(co)
+
+#check that co is positive definite. Make diagonals 1.0001.
+
+library(corpcor)
+
+reps <- round($_[0])
+
+
+if(is.positive.definite(co)==F){
+	co <- make.positive.definite(co)
+}
+if(is.positive.definite(co)==F){
+	matrix(scan('plink.ld',quiet=T),nc=numsnps) -> co
+	for(i in 1:numsnps){
+		co[i,i] <- 1.0001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.001
+	}
+}
+if(is.positive.definite(co)==F){
+	for(i in 1:numsnps){
+		co[i,i] <- 1.01
+	}
+}
+
+library(mvtnorm)
+rmvnorm(reps,mean=rep(0,numsnps),sigma=co) -> rd
+rowSums(rd ^2) -> summedsq
+
+read.table('tempgene',header=F) -> gene
+ass <- gene[,6]
+#ass
+sum(ass,na.rm=T) -> sumass
+sum(!is.na(ass)) -> len # get number of snps with non-missing test stat
+length(ass) -> asslen
+
+sum(ifelse(sumass > summedsq, 0, 1))/length(summedsq) -> empp
+write.table(empp,'tempempp',row.names=F,col.names=F,quote=F)
+write.table(rd^2,'temprd2',quote=F,col.names=F,row.names=F)
+EOF");
+
+# Use perl to get topsnp, then read into R
+
+$topnumsnps = $percentage*$numsnps+0.5;
+
+open(RD,"temprd2");
+@rd = <RD>;
+close(RD);
+
+
+foreach $line (@rd){
+	chomp($line);
+	my @line = split(/ /,$line);
+	my @line = @line;
+	my @results = sort sort_by_number @line;
+	open(PRINTRESULTS, ">>temprd-sorted");
+	print PRINTRESULTS "@results[0]\n";
+	close(PRINTRESULTS);
+}
+
+system("R --vanilla --slave <<EOF
+
+options(warn=-1)
+rm(list = ls(all = TRUE))
+
+reps <- $_[0]
+
+summedsqtopten <- scan('temprd-sorted',quiet=T)
+
+read.table('tempgene',header=F) -> gene
+ass <- gene[,6]
+#ass
+sum(ass,na.rm=T) -> sumass
+sum(!is.na(ass)) -> len # get number of snps with non-missing test stat
+length(ass) -> asslen
+
+sumasstopten <- max(ass)
+sum(ifelse(sumasstopten > summedsqtopten, 0, 1))/length(summedsqtopten) -> empptopten
+#empptopten
+
+empp <- scan('tempempp',quiet=T)
+
+snpp <- pchisq(max(ass),1,lower.tail=F)
+snpname <- gene[which(ass==max(ass)),1][1]
+
+if(empp >= 0.1 & empptopten >= 0.1){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'correctedp.txt',row.names=F,col.names=F)
+}
+
+if(empp < 0.1 & empp > 0){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten < 0.1 & empptopten > 0){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'do100000sims',row.names=F,col.names=F)
+}
+
+if(empptopten == 0 | empp == 0){
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'needmoresims',row.names=F,col.names=F)
+}
+
+write.table(data.frame('$chr','$gene',asslen,reps,unique(gene[4]),unique(gene[5]),sumass,empp,empptopten,snpname,snpp),'alwayswritep',row.names=F,col.names=F)
+
+EOF");
+
+}
+}
+
+sub sort_by_number{ $b <=> $a }
+
+sub plink{ # Use plink to generate ld matrix, then check for errors
+	
+	if(defined($custom)){
+		system("plink --bfile custom$chr --extract tempgene.snp --matrix --r --noweb --silent > /dev/null");
+	}
+	else{
+		system("plink --bfile $chip/genebeds/$gene --extract tempgene.snp --matrix --r --noweb --silent > /dev/null");
+	}
+
+	open(PLINKLD, "plink.ld");
+	@plinkld = <PLINKLD>;
+	foreach $plinkld(@plinkld){
+		$plinkld =~ s/nan/0/g; #replace nan's with 0 in ld matrix
+	}
+	if(scalar(@plinkld == 1)){
+		@plinkld = 1;
+	}
+	
+	open(PRINTPLINKLD, ">plink.ld");
+	print PRINTPLINKLD "@plinkld";
+	$numsnps = scalar(@plinkld);
+	close PRINTPLINKLD;
+	close PLINKLD;
+	
+}
+
+sub customtest{ # VEGAS using custom set of SNPs - default
+	print "\nReading custom genotypes...done\n\n";
+	unless(defined($topsnp) || defined($topten)){ # Define vanilla test
+		$vanillatest=1;
+	}
+	
+	open(HGLIST,"../glist-hg18") or die "Error: Cannot find glist-hg18\n";
+	@hglist = <HGLIST>;
+	close(HGLIST);
+
+	for ($chr = 1; $chr <= 22; $chr++) {
+	#for ($chr=22){
+		system("plink --bfile ../$custom --chr $chr --make-bed --out custom$chr --noweb --silent > /dev/null");
+		
+		open(ALLGENES, "$chip/geneset/allgene$chr") or die "Error: Cannot find $chip/geneset/allgene$chr\n";
+		@allgenes = <ALLGENES>;
+		close(ALLGENES);
+		
+		foreach $gene (@allgenes){
+
+			if(-e "tempgene.snp"){system("rm tempgene.snp");}
+			if(-e "tempgene.pvalue"){system("rm tempgene.pvalue");}
+			if(-e "gene.position"){system("rm gene.position");}
+			
+			chomp($gene);
+			system("grep -w \"$gene\" ../glist-hg18 > gene.position");
+			
+			@glistpos = grep(/\b$gene\b/, @hglist);	
+			chomp(@glistpos);
+			@glistpos = split(/ /,@glistpos[0]);
+		
+			if(!defined($lower)){
+				$start = @glistpos[1]-50000;
+			}
+			else{
+				$start = @glistpos[1]-$lower;
+			}
+			if(!defined($upper)){
+				$stop = @glistpos[2]+50000;
+			}
+			else{
+				$stop = @glistpos[2]+$upper;
+			}
+	
+			system("plink --bfile custom$chr --chr $chr --from-bp $start --to-bp $stop --write-snplist --noweb --silent > /dev/null"); # It would be super if you could do these three lines with one PLINK command
+			if(-e "plink.snplist"){
+				system("mv plink.snplist tempgene.snp");
+			}
+			
+			open(SNPLIST,"tempgene.snp");
+			@snplist = <SNPLIST>;
+			close(SNPLIST);
+			
+			if(scalar(@snplist == 0)){next;}
+			
+			foreach $snp(@snplist){
+				chomp($snp);
+				system("grep -w \"$snp\" temppvals >> tempgene.pvalue");
+			}
+			
+			# Send to R to do make into tempgene format, then send to &hapsmims? - files prepared: tempgene.pvalue plink.ld gene.position
+			
+			&maketempgener;
+			&hapsims;
+		}
+	}
+}
+
+sub docustomchr { # VEGAS using custom set of SNPs - chromosome
+	print "\nReading custom genotypes...done\n\n";
+	unless(defined($topsnp) || defined($topten)){ # Define vanilla test
+		$vanillatest=1;
+	}
+	
+	open(HGLIST,"../glist-hg18") or die "Error: Cannot find glist-hg18\n";
+	@hglist = <HGLIST>;
+	close(HGLIST);
+
+	#for ($chr = 1; $chr <= 22; $chr++) {
+	for ($chr=$dochr){
+		system("plink --bfile ../$custom --chr $chr --make-bed --out custom$chr --noweb --silent > /dev/null");
+		
+		open(ALLGENES, "$chip/geneset/allgene$chr");
+		@allgenes = <ALLGENES>;
+		close(ALLGENES);
+		
+		foreach $gene (@allgenes){
+
+			if(-e "tempgene.snp"){system("rm tempgene.snp");}
+			if(-e "tempgene.pvalue"){system("rm tempgene.pvalue");}
+			if(-e "gene.position"){system("rm gene.position");}
+			
+			chomp($gene);
+			system("grep -w \"$gene\" ../glist-hg18 > gene.position");
+			
+			@glistpos = grep(/\b$gene\b/, @hglist);	
+			chomp(@glistpos);
+			@glistpos = split(/ /,@glistpos[0]);
+		
+			if(!defined($lower)){
+				$start = @glistpos[1]-50000;
+			}
+			else{
+				$start = @glistpos[1]-$lower;
+			}
+			if(!defined($upper)){
+				$stop = @glistpos[2]+50000;
+			}
+			else{
+				$stop = @glistpos[2]+$upper;
+			}
+	
+			system("plink --bfile custom$chr --chr $chr --from-bp $start --to-bp $stop --write-snplist --noweb --silent > /dev/null"); # It would be super if you could do these three lines with one PLINK command
+			if(-e "plink.snplist"){system("mv plink.snplist tempgene.snp");}
+			
+			open(SNPLIST,"tempgene.snp");
+			@snplist = <SNPLIST>;
+			close(SNPLIST);
+			
+			if(scalar(@snplist == 0)){next;}
+			
+			foreach $snp(@snplist){
+				chomp($snp);
+				system("grep -w \"$snp\" temppvals >> tempgene.pvalue");
+			}
+			
+			# Send to R to do make into tempgene format, then send to &hapsmims? - files prepared: tempgene.pvalue plink.ld gene.position
+			
+			&maketempgener;
+			&hapsims;
+		}
+	}
+}
+
+sub docustomlist { # VEGAS using custom set of SNPs - genelist
+	print "\nReading custom genotypes...done\n\n";
+	unless(defined($topsnp) || defined($topten)){ # Define vanilla test
+		$vanillatest=1;
+	}
+	
+	open(HG18, "../glist-hg18");
+	@hg18 = <HG18>;
+	close HG18;
+	
+	# Read in genelist and match to chromosomes
+	foreach $genelist (@genelist){
+		chomp($genelist);
+		$genelist =~ s/^\s+//;
+		$genelist =~ s/\s+$//;
+		foreach $hg18 (@hg18){
+			chomp($hg18);
+			$hg18 =~ s/^\s+//;
+			$hg18 =~ s/\s+$//;
+			@hglist = split(/ /,$hg18);
+			if($genelist eq @hglist[3]){
+				push(@dochroms,"@hglist[0]\n");
+				push(@dogenes,"@hglist[3]\n");
+			
+				open(WRITECHR, ">>allgene@hglist[0]");
+				print WRITECHR "$genelist\n";
+				close WRITECHR;			
+			}
+		}
+	}
+	
+	# Extract unique chromosomes
+	%seen = ();
+	foreach $item (@dochroms){
+		push(@uniqchr, $item) unless $seen{$item}++;
+	}
+
+
+	foreach $chr(@uniqchr) {
+	#for ($chr=22){
+		chomp($chr);
+		system("plink --bfile ../$custom --chr $chr --make-bed --out custom$chr --noweb --silent > /dev/null");
+		
+		open(ALLGENES, "allgene$chr");
+		@allgenes = <ALLGENES>;
+		close(ALLGENES);
+		
+		foreach $gene (@allgenes){
+
+			if(-e "tempgene.snp"){system("rm tempgene.snp");}
+			if(-e "tempgene.pvalue"){system("rm tempgene.pvalue");}
+			if(-e "gene.position"){system("rm gene.position");}
+			
+			chomp($gene);
+			system("grep -w \"$gene\" ../glist-hg18 > gene.position");
+			
+			@glistpos = grep(/\b$gene\b/, @hg18);	
+			chomp(@glistpos);
+			@glistpos = split(/ /,@glistpos[0]);
+		
+			if(!defined($lower)){
+				$start = @glistpos[1]-50000;
+			}
+			else{
+				$start = @glistpos[1]-$lower;
+			}
+			if(!defined($upper)){
+				$stop = @glistpos[2]+50000;
+			}
+			else{
+				$stop = @glistpos[2]+$upper;
+			}
+	
+			system("plink --bfile custom$chr --chr $chr --from-bp $start --to-bp $stop --write-snplist --noweb --silent");
+			if(-e "plink.snplist"){system("mv plink.snplist tempgene.snp");}
+			
+			open(SNPLIST,"tempgene.snp");
+			@snplist = <SNPLIST>;
+			close(SNPLIST);
+			
+			if(scalar(@snplist == 0)){next;}
+			
+			foreach $snp(@snplist){
+				chomp($snp);
+				system("grep -w \"$snp\" temppvals >> tempgene.pvalue");
+			}
+			
+			# Send to R to do make into tempgene format, then send to &hapsmims? - files prepared: tempgene.pvalue plink.ld gene.position
+			
+			&maketempgener;
+			&hapsims;
+		}
+	}
+}
+
+	
+
+
+sub maketempgener{
+unless(-z "tempgene.pvalue"){
+	system("
+
+R --vanilla --slave <<EOF
+options(warn=-1)
+pvals <- read.table('tempgene.pvalue',header=F)
+positions <- read.table('gene.position',header=F)
+tempgene <- data.frame(pvals[,1],rep(positions[,4],length(pvals[,1])),rep(positions[,1],length(pvals[,1])),rep(positions[,2],length(pvals[,1])),rep(positions[,3],length(pvals[,1])),qchisq(pvals[,2],1,lower.tail=F))
+write.table(tempgene,'tempgene',row.names=F,col.names=F,quote=F)
+
+EOF");
+
+system("awk '{print \$1;}' tempgene > tempgene.snp");
+}
+}
+	
+sub checkpackages
+{
+	system("
+R --vanilla --slave <<EOF
+options(warn=-1)
+write.table(.packages(all.available=T),'R-packagelist',quote=F,col.names=F,row.names=F)
+EOF");
+
+	system("grep -w \"mvtnorm\" R-packagelist >> testpackagelist");
+	system("grep -w \"corpcor\" R-packagelist >> testpackagelist");
+	open(TESTPACKAGELIST,"testpackagelist");
+	my @testpackagelist = <TESTPACKAGELIST>;
+	if(scalar(@testpackagelist ne 2)){
+		die "Error: Missing R library: VEGAS requires corpcor and mvtnorm to run\n";
+	}
+}
+
+sub numbercheck
+{
+	system("
+R --vanilla --slave <<EOF
+options(warn=-1)
+isnumeric <- function(s) !is.na(as.numeric(s))
+pvals <- read.table('temppvals',header=F,colClasses=c('character','numeric'))
+ifelse(isnumeric(pvals[,2]),0,1) -> isnumber
+if(sum(isnumber) > 0){
+	write.table(pvals[which(isnumber==1),],'temp',row.names=F,col.names=F,quote=F)
+}
+ifelse(pvals[,2]<0 | pvals[,2] > 1,1,0) -> notpvalue
+if(sum(notpvalue) > 0 | is.na(sum(notpvalue))){
+	write.table(pvals[which(notpvalue==1),],'invalid-pvalues',row.names=F,col.names=F,quote=F)
+}
+EOF");
+
+	if(-e "temp"){
+		system("cat temp >> invalid-pvalues");
+	}
+
+	if(-e "invalid-pvalues"){
+		system("mv invalid-pvalues ../invalid-pvalues");
+		die "Error: Invalid p-values detected. See \"invalid-pvalues\" for list of problem SNPs\n";
+	}
+}
+
+###--- End subroutines ---###
